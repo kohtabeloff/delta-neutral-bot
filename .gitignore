@@ -1,0 +1,12 @@
+.env
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+db/*.db
+*.log
+.claude/
+CLAUDE.md
+AGENTS.md
+.rsync-exclude
