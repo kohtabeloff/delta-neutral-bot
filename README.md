@@ -155,7 +155,7 @@ sudo apt install python3.11 python3.11-venv python3-pip git -y
 cd ~
 ```
 ```bash
-git clone https://github.com/YOUR_USERNAME/delta-neutral-bot.git
+git clone https://github.com/kohtabeloff/delta-neutral-bot.git
 ```
 ```bash
 cd delta-neutral-bot
