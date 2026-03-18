@@ -1,0 +1,28 @@
+[Unit]
+Description=Delta-Neutral Funding Bot
+After=network.target
+Wants=network-online.target
+
+[Service]
+# Замени YOUR_USER на своего пользователя на VPS (например: ubuntu, root)
+User=YOUR_USER
+
+# Замени путь на реальный путь к проекту на VPS
+WorkingDirectory=/home/YOUR_USER/delta-neutral-bot
+
+# Полный путь к python в виртуальном окружении
+ExecStart=/home/YOUR_USER/delta-neutral-bot/venv/bin/python main.py
+
+# Автоперезапуск если бот упал (через 10 секунд)
+Restart=always
+RestartSec=10
+
+# Логи пишутся через journald (смотреть: journalctl -u delta-bot -f)
+StandardOutput=journal
+StandardError=journal
+
+# Переменные окружения берутся из .env файла
+EnvironmentFile=/home/YOUR_USER/delta-neutral-bot/.env
+
+[Install]
+WantedBy=multi-user.target
