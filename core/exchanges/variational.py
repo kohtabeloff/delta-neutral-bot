@@ -6,6 +6,76 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+
+async def _siwe_login(wallet: str, private_key: str) -> str:
+    """
+    Авторизация на Variational через подпись кошелька (SIWE — Sign-In with Ethereum).
+    Возвращает новый vr-token.
+    Вызывается автоматически при HTTP 401 (протухший токен).
+    """
+    try:
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+    except ImportError:
+        raise RuntimeError(
+            "eth-account не установлен: pip install eth-account"
+        )
+
+    async with _make_chrome_session() as client:
+        # Шаг 1: получаем SIWE-сообщение для подписи
+        resp = await client.post(
+            f"{VARIATIONAL_API_BASE}/auth/generate_signing_data",
+            json={"address": wallet},
+            headers={
+                "vr-connected-address": wallet,
+                "content-type": "application/json",
+                "origin": "https://omni.variational.io",
+                "referer": "https://omni.variational.io/",
+            },
+            timeout=15,
+        )
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(
+            f"Variational auth: generate_signing_data HTTP {resp.status_code}: {resp.text[:200]}"
+        )
+
+    siwe_message = resp.text.strip().strip('"')
+    if not siwe_message:
+        raise RuntimeError("Variational auth: пустое SIWE-сообщение")
+
+    # Шаг 2: подписываем приватным ключом
+    msg = encode_defunct(text=siwe_message)
+    signed = Account.sign_message(msg, private_key=private_key)
+    signature = signed.signature.hex()
+    if signature.startswith("0x"):
+        signature = signature[2:]
+
+    # Шаг 3: логинимся и получаем новый токен
+    async with _make_chrome_session() as client:
+        resp = await client.post(
+            f"{VARIATIONAL_API_BASE}/auth/login",
+            json={"address": wallet, "signed_message": signature},
+            headers={
+                "vr-connected-address": wallet,
+                "content-type": "application/json",
+                "origin": "https://omni.variational.io",
+                "referer": "https://omni.variational.io/",
+            },
+            timeout=15,
+        )
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(
+            f"Variational auth: login HTTP {resp.status_code}: {resp.text[:200]}"
+        )
+
+    data = resp.json()
+    new_token = data.get("token") or ""
+    if not new_token:
+        raise RuntimeError(f"Variational auth: токен не получен, ответ: {data}")
+
+    logger.info("Variational: токен успешно обновлён через SIWE")
+    return new_token
+
 # Публичный API (статистика, без авторизации)
 VARIATIONAL_META_BASE = "https://omni-client-api.prod.ap-northeast-1.variational.io"
 # Приватный API (ордера, позиции — требует vr-token)
@@ -43,10 +113,17 @@ class VariationalExecutor:
       2. POST /api/orders/new/market  { quote_id, side, max_slippage, is_reduce_only }
     """
 
-    def __init__(self, vr_token: str, wallet_address: str, cf_clearance: str = ""):
+    def __init__(
+        self,
+        vr_token: str,
+        wallet_address: str,
+        cf_clearance: str = "",
+        private_key: str = "",
+    ):
         self._token = vr_token
         self._wallet = wallet_address.lower()
         self._cf_clearance = cf_clearance  # оставлен для совместимости
+        self._private_key = private_key   # приватный ключ для авто-обновления токена
         self._assets: dict = {}  # symbol → {funding_interval_s, ...}
 
     def _headers(self) -> dict:
@@ -67,6 +144,26 @@ class VariationalExecutor:
         if self._cf_clearance:
             cookies["cf_clearance"] = self._cf_clearance
         return cookies
+
+    async def _refresh_token(self) -> bool:
+        """
+        Пытается обновить vr-token через SIWE (Sign-In with Ethereum).
+        Возвращает True если успешно. Нужен VARIATIONAL_PRIVATE_KEY в .env.
+        """
+        if not self._private_key:
+            logger.warning(
+                "Variational: VARIATIONAL_PRIVATE_KEY не задан — "
+                "авто-обновление токена невозможно. "
+                "Обнови VARIATIONAL_TOKEN в .env вручную."
+            )
+            return False
+        try:
+            new_token = await _siwe_login(self._wallet, self._private_key)
+            self._token = new_token
+            return True
+        except Exception as e:
+            logger.error(f"Variational: не удалось обновить токен: {e}")
+            return False
 
     async def _ensure_assets(self):
         """Загружает список доступных тикеров."""
@@ -123,6 +220,22 @@ class VariationalExecutor:
                 cookies=self._cookies(),
                 timeout=15,
             )
+        if resp.status_code == 401:
+            logger.warning(f"Variational: токен протух (401), пробуем обновить...")
+            if await self._refresh_token():
+                async with _make_chrome_session() as client:
+                    resp = await client.post(
+                        f"{VARIATIONAL_API_BASE}/quotes/indicative",
+                        json=payload,
+                        headers=self._headers(),
+                        cookies=self._cookies(),
+                        timeout=15,
+                    )
+            else:
+                raise RuntimeError(
+                    f"Variational: ошибка получения quote для {symbol}: "
+                    f"HTTP 401 — токен истёк, обнови VARIATIONAL_TOKEN в .env"
+                )
         if resp.status_code not in (200, 201):
             raise RuntimeError(
                 f"Variational: ошибка получения quote для {symbol}: "
@@ -155,6 +268,27 @@ class VariationalExecutor:
                 cookies=self._cookies(),
                 timeout=15,
             )
+        if resp.status_code == 401:
+            logger.warning("Variational: токен протух при отправке ордера (401), обновляем...")
+            if await self._refresh_token():
+                async with _make_chrome_session() as client:
+                    resp = await client.post(
+                        f"{VARIATIONAL_API_BASE}/orders/new/market",
+                        json={
+                            "quote_id": quote_id,
+                            "side": side,
+                            "max_slippage": MAX_SLIPPAGE,
+                            "is_reduce_only": is_reduce_only,
+                        },
+                        headers=self._headers(),
+                        cookies=self._cookies(),
+                        timeout=15,
+                    )
+            else:
+                raise RuntimeError(
+                    "Variational: ошибка отправки ордера: HTTP 401 — токен истёк, "
+                    "обнови VARIATIONAL_TOKEN в .env"
+                )
         if resp.status_code not in (200, 201):
             raise RuntimeError(
                 f"Variational: ошибка отправки ордера: "
@@ -362,6 +496,19 @@ class VariationalExecutor:
                     cookies=self._cookies(),
                     timeout=10,
                 )
+            if resp.status_code == 401:
+                logger.warning("Variational: токен протух при чтении позиций (401), обновляем...")
+                if await self._refresh_token():
+                    async with _make_chrome_session() as client:
+                        resp = await client.get(
+                            f"{VARIATIONAL_API_BASE}/positions",
+                            headers=self._headers(),
+                            cookies=self._cookies(),
+                            timeout=10,
+                        )
+                else:
+                    logger.warning("Variational: не удалось обновить токен, позиции недоступны")
+                    return None
             if resp.status_code != 200:
                 logger.warning(
                     f"Variational positions: HTTP {resp.status_code}: {resp.text[:200]}"

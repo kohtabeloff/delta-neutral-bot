@@ -62,3 +62,40 @@ async def send_message(text: str, reply_markup=None) -> None:
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=reply_markup,
     )
+
+
+async def send_message_get_id(text: str, reply_markup=None) -> int | None:
+    """Отправляет сообщение и возвращает его message_id."""
+    bot = get_bot()
+    msg = await bot.send_message(
+        chat_id=TELEGRAM_CHAT_ID,
+        text=text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=reply_markup,
+    )
+    return msg.message_id
+
+
+async def pin_message(message_id: int) -> None:
+    """Пинит сообщение в чате."""
+    try:
+        bot = get_bot()
+        await bot.pin_chat_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            message_id=message_id,
+            disable_notification=True,
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось запинить сообщение: {e}")
+
+
+async def unpin_message(message_id: int) -> None:
+    """Открепляет сообщение в чате."""
+    try:
+        bot = get_bot()
+        await bot.unpin_chat_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            message_id=message_id,
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось открепить сообщение: {e}")

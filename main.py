@@ -1,5 +1,8 @@
 import asyncio
+import base64
+import json
 import logging
+import os
 import time
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
@@ -9,6 +12,7 @@ from telegram.constants import ParseMode
 from config import (
     SCAN_INTERVAL_SECONDS, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, POSITION_SIZE_USD,
     AUTHOR_CHANNEL, AUTHOR_CHANNEL_NAME, DONATION_WALLET_EVM, DONATION_WALLET_SOL,
+    VARIATIONAL_TOKEN, VARIATIONAL_PRIVATE_KEY,
 )
 from scanners.hyperliquid import HyperliquidScanner
 from scanners.bybit import BybitScanner
@@ -22,7 +26,7 @@ from core.executor import (
     open_pair, close_pair, scale_in_pair,
     open_pair_vr_ext, close_pair_vr_ext, scale_in_pair_vr_ext,
 )
-from bot.telegram import send_opportunity, send_message
+from bot.telegram import send_opportunity, send_message, send_message_get_id, pin_message, unpin_message
 from db.database import (
     init_db, get_open_positions, save_funding_snapshot, get_funding_stats,
     get_open_pairs, get_positions_by_pair, get_closed_pairs, count_closed_pairs,
@@ -76,6 +80,139 @@ BTN_SCAN = "🔍 Сканировать сейчас"
 BTN_HISTORY = "📋 История"
 BTN_SETTINGS = "⚙️ Настройки"
 BTN_SUPPORT = "💙 Поддержать автора"
+
+# Путь к .env для обновления токена
+_ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+# Когда последний раз отправляли предупреждение о токене (timestamp)
+_vr_token_last_warned: float = 0
+# message_id запиненного предупреждения (None если не запинено)
+_vr_token_pinned_msg_id: int | None = None
+
+
+def _parse_jwt_exp(token: str) -> float | None:
+    """Возвращает timestamp истечения JWT или None если не удалось распарсить."""
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload))
+        return float(data.get("exp", 0)) or None
+    except Exception:
+        return None
+
+
+def _is_jwt(text: str) -> bool:
+    """Проверяет что строка похожа на JWT (три части через точку)."""
+    parts = text.strip().split(".")
+    return len(parts) == 3 and all(len(p) > 10 for p in parts)
+
+
+def _update_env_token(new_token: str):
+    """Обновляет VARIATIONAL_TOKEN в .env файле."""
+    try:
+        with open(_ENV_PATH, "r") as f:
+            lines = f.readlines()
+        updated = False
+        for i, line in enumerate(lines):
+            if line.startswith("VARIATIONAL_TOKEN="):
+                lines[i] = f"VARIATIONAL_TOKEN={new_token}\n"
+                updated = True
+                break
+        if not updated:
+            lines.append(f"VARIATIONAL_TOKEN={new_token}\n")
+        with open(_ENV_PATH, "w") as f:
+            f.writelines(lines)
+    except Exception as e:
+        logger.error(f"Не удалось обновить .env: {e}")
+
+
+async def _check_variational_token():
+    """
+    Проверка срока жизни Variational токена. Запускается каждый час.
+
+    С приватником: при < 2 днях молча обновляет через SIWE.
+    Без приватника: эскалирующие предупреждения + пин первого сообщения:
+      - 2 дня ... 1 день  → каждые 8 часов (3 раза в сутки)
+      - 1 день ... 6 часов → каждые 3 часа
+      - < 6 часов          → каждый час
+    """
+    global _vr_token_last_warned, _vr_token_pinned_msg_id
+
+    import config as _cfg
+    token = _cfg.VARIATIONAL_TOKEN
+    exp = _parse_jwt_exp(token)
+    if not exp:
+        return
+
+    days_left = (exp - time.time()) / 86400
+
+    # Токен живой — ничего делать не надо
+    if days_left >= 2:
+        return
+
+    # Если есть приватник — обновляем автоматически
+    if VARIATIONAL_PRIVATE_KEY:
+        try:
+            from config import VARIATIONAL_WALLET
+            from core.exchanges.variational import _siwe_login
+            new_token = await _siwe_login(VARIATIONAL_WALLET, VARIATIONAL_PRIVATE_KEY)
+            _update_env_token(new_token)
+            _cfg.VARIATIONAL_TOKEN = new_token
+            logger.info(f"Variational: токен обновлён через SIWE (оставалось {days_left:.1f} дн.)")
+        except Exception as e:
+            logger.error(f"Variational: не удалось авто-обновить токен: {e}")
+            await send_message(
+                f"⚠️ *Variational: не удалось обновить токен автоматически*\n"
+                f"Ошибка: `{e}`\n\n"
+                f"Зайди на omni.variational.io → F12 → Application → Cookies → скопируй `vr-token` и отправь мне.",
+            )
+        return
+
+    # Без приватника — определяем интервал предупреждений
+    hours_left = days_left * 24
+    if hours_left <= 6:
+        warn_interval_h = 1       # каждый час
+    elif hours_left <= 24:
+        warn_interval_h = 3       # каждые 3 часа
+    else:
+        warn_interval_h = 8       # каждые 8 часов (3 раза в сутки)
+
+    since_last = (time.time() - _vr_token_last_warned) / 3600
+    if since_last < warn_interval_h:
+        return  # ещё не время
+
+    # Формируем текст предупреждения
+    if hours_left <= 1:
+        time_str = f"{hours_left * 60:.0f} минут"
+    elif hours_left < 24:
+        time_str = f"{hours_left:.0f} часов"
+    else:
+        time_str = f"{days_left:.0f} дня" if days_left < 2 else f"{days_left:.0f} дней"
+
+    text = (
+        f"⚠️ *Variational токен истекает через {time_str}*\n\n"
+        f"Чтобы обновить:\n"
+        f"1. Зайди на omni.variational.io\n"
+        f"2. F12 → Application → Cookies\n"
+        f"3. Скопируй значение `vr-token`\n"
+        f"4. Отправь его прямо сюда в чат\n\n"
+        f"Бот подхватит автоматически."
+    )
+
+    pinned_in_db = await load_setting("vr_token_pinned_msg_id", "")
+    is_first_warning = not pinned_in_db
+
+    msg_id = await send_message_get_id(text)
+    _vr_token_last_warned = time.time()
+
+    # Пинаем только первое предупреждение, сохраняем id в базу
+    if is_first_warning and msg_id:
+        _vr_token_pinned_msg_id = msg_id
+        await save_setting("vr_token_pinned_msg_id", str(msg_id))
+        await pin_message(msg_id)
+
 
 ALL_SCANNERS = [
     HyperliquidScanner(),
@@ -1410,6 +1547,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Ошибка: {e}")
         return
 
+    # Пользователь прислал новый Variational токен (JWT)
+    if _is_jwt(text) and not _waiting_for_size and not _waiting_for_scale_in:
+        global _vr_token_last_warned, _vr_token_pinned_msg_id
+        new_token = text.strip()
+        exp = _parse_jwt_exp(new_token)
+        if exp and exp > time.time():
+            _update_env_token(new_token)
+            import config as _cfg
+            _cfg.VARIATIONAL_TOKEN = new_token
+            _vr_token_last_warned = 0  # сбрасываем счётчик предупреждений
+
+            # Открепляем запиненное предупреждение
+            pinned_id_str = await load_setting("vr_token_pinned_msg_id", "")
+            if pinned_id_str:
+                await unpin_message(int(pinned_id_str))
+                await save_setting("vr_token_pinned_msg_id", "")
+                _vr_token_pinned_msg_id = None
+
+            from datetime import datetime
+            exp_str = datetime.fromtimestamp(exp).strftime("%d.%m.%Y %H:%M")
+            await update.message.reply_text(
+                f"✅ *Variational токен обновлён*\nДействителен до: {exp_str}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await update.message.reply_text("❌ Токен уже истёк или невалидный. Попробуй снова.")
+        return
+
     if text == BTN_POSITIONS:
         await show_positions(update)
 
@@ -1865,10 +2030,12 @@ async def main():
         "🤖 *Бот запущен*\nНачинаю сканирование рынка...\n\nНапиши /start чтобы активировать кнопки управления"
     )
 
+    await _check_variational_token()
     await scan_and_notify()
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(scan_and_notify, "interval", seconds=SCAN_INTERVAL_SECONDS)
+    scheduler.add_job(_check_variational_token, "interval", hours=1)
     scheduler.start()
     logger.info(f"Планировщик запущен, интервал: {SCAN_INTERVAL_SECONDS}с")
 

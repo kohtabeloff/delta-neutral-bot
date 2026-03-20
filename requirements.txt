@@ -7,4 +7,5 @@ cryptography>=42.0.0        # Ed25519 подпись для Backpack
 lighter-sdk                  # SDK для торговли на Lighter DEX
 hyperliquid-python-sdk       # SDK для Hyperliquid
 curl-cffi>=0.7.0             # Chrome TLS fingerprint для Variational (обход Cloudflare)
+eth-account>=0.11.0          # SIWE-авторизация для авто-обновления Variational токена
 x10-python-trading-starknet  # SDK для торговли на Extended (StarkNet)
