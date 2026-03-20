@@ -27,9 +27,10 @@ LIGHTER_API_KEY_INDEX = int(os.getenv("LIGHTER_API_KEY_INDEX", "2"))
 LIGHTER_ACCOUNT_INDEX = int(os.getenv("LIGHTER_ACCOUNT_INDEX", "0"))
 
 # Variational DEX
-VARIATIONAL_TOKEN = os.getenv("VARIATIONAL_TOKEN", "")          # vr-token из браузера
-VARIATIONAL_WALLET = os.getenv("VARIATIONAL_WALLET", "")        # твой EVM адрес 0x...
-VARIATIONAL_CF_CLEARANCE = os.getenv("VARIATIONAL_CF_CLEARANCE", "")  # cf_clearance от Cloudflare
+VARIATIONAL_TOKEN = os.getenv("VARIATIONAL_TOKEN", "")              # vr-token из браузера (начальный)
+VARIATIONAL_WALLET = os.getenv("VARIATIONAL_WALLET", "")            # твой EVM адрес 0x...
+VARIATIONAL_CF_CLEARANCE = os.getenv("VARIATIONAL_CF_CLEARANCE", "") # cf_clearance от Cloudflare
+VARIATIONAL_PRIVATE_KEY = os.getenv("VARIATIONAL_PRIVATE_KEY", "")  # EVM приватный ключ для авто-обновления токена
 
 # Extended Exchange (StarkNet)
 EXTENDED_API_KEY = os.getenv("EXTENDED_API_KEY", "")

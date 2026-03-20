@@ -11,7 +11,7 @@ from config import (
     HYPERLIQUID_PRIVATE_KEY, WALLET_ADDRESS, POSITION_SIZE_USD,
     BACKPACK_API_KEY, BACKPACK_API_SECRET,
     LIGHTER_API_PRIVATE_KEY, LIGHTER_API_KEY_INDEX, LIGHTER_ACCOUNT_INDEX,
-    VARIATIONAL_TOKEN, VARIATIONAL_WALLET, VARIATIONAL_CF_CLEARANCE,
+    VARIATIONAL_TOKEN, VARIATIONAL_WALLET, VARIATIONAL_CF_CLEARANCE, VARIATIONAL_PRIVATE_KEY,
     EXTENDED_API_KEY, EXTENDED_PUBLIC_KEY, EXTENDED_PRIVATE_KEY, EXTENDED_VAULT_ID,
 )
 from db.database import save_position, save_pair, scale_pair_db, scale_pair_db_generic, close_position, close_pair as db_close_pair
@@ -358,7 +358,10 @@ def _get_variational():
     from core.exchanges.variational import VariationalExecutor
     if not VARIATIONAL_TOKEN or not VARIATIONAL_WALLET:
         raise RuntimeError("Variational: VARIATIONAL_TOKEN и VARIATIONAL_WALLET не заданы в .env")
-    return VariationalExecutor(VARIATIONAL_TOKEN, VARIATIONAL_WALLET, VARIATIONAL_CF_CLEARANCE)
+    return VariationalExecutor(
+        VARIATIONAL_TOKEN, VARIATIONAL_WALLET,
+        VARIATIONAL_CF_CLEARANCE, VARIATIONAL_PRIVATE_KEY,
+    )
 
 
 def _get_extended():
